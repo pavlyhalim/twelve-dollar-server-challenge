@@ -61,6 +61,16 @@ vm_restart() {
   vm_start
 }
 
+# A clean shutdown and boot before every run (FRESH=0 to skip): kernel state left by a 300k-user run
+# (TIME_WAIT sockets, slab, fragmented memory) otherwise carries into the next and biases late runs
+fresh_guest() {
+  log "rebooting the guest for a clean kernel"
+  vm 'sudo sync; sudo systemctl poweroff' >/dev/null 2>&1
+  for _ in $(seq 60); do sudo kill -0 "$(sudo cat $W/qemu.pid 2>/dev/null)" 2>/dev/null || break; sleep 1; done
+  sudo kill "$(sudo cat $W/qemu.pid 2>/dev/null)" 2>/dev/null; sleep 1
+  vm_start
+}
+
 log "== host: $(nproc) CPUs, $(awk '/MemTotal/ {print int($2/1048576)}' /proc/meminfo) GB, $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2)"
 # EPYC 7763 hosts measured 45-68 us per request in the guest against the box's ~26: nothing run there says
 # anything about the box, so stop before spending an hour on it
@@ -136,7 +146,7 @@ printf '%-6s %8s  %-58s %8s %s\n' build users result "req/s" server > $LOGS/summ
 one_run() { # build users [ramp hold rampdown] -> 0 on PASS
   local b=$1 n=$2 ramp=${3:-60} hold=${4:-${HOLD:-300}} down=${5:-30}
   log "== $b at $n users"
-  vm true 2>/dev/null || vm_restart || exit 1
+  if [ "${FRESH:-1}" = 1 ]; then fresh_guest || exit 1; else vm true 2>/dev/null || vm_restart || exit 1; fi
   vm "sudo bash /srv/vm-server.sh start /srv/$b" | tee $LOGS/$b-$n.log
   local prof=""
   if [ -n "${PROFILE:-}" ]; then (sleep "$PROFILE"; vm "sudo bash /srv/vm-server.sh profile 30") > $LOGS/$b-$n.prof 2>&1 & prof=$!; fi
