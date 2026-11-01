@@ -89,6 +89,8 @@ static uint64_t n_close_hdr, n_slow_connect, n_connect_err, n_eof, n_timeout, n_
 static uint32_t hist_all[NB];
 /* the same, per 10 s report window, so a ramp shows where it breaks */
 static uint32_t hist_win[NB];
+static uint32_t hist_winq[Q_N][NB]; /* per route, to see which requests make the tail */
+static uint64_t win_n[Q_N];
 static uint64_t win_total, win_errs;
 static int n_open; /* sockets connected or connecting */
 
@@ -133,6 +135,8 @@ static void record(struct vu *v, int status) {
   hist[q][b]++;
   hist_all[b]++;
   hist_win[b]++;
+  hist_winq[q][b]++;
+  win_n[q]++;
   win_total++;
   int ok = (q == Q_FEED || q == Q_POST) ? status == 200 : (q == Q_LIKE ? (status == 200 || status == 201) : status == 201);
   if (!ok) { n_bad[q]++; n_errs++; win_errs++; }
@@ -419,13 +423,17 @@ static void report(int final) {
     uint64_t t = now_ns();
     double dt = t_last ? (double)(t - t_last) / 1e9 : elapsed;
     t_last = t;
-    fprintf(stderr, "win: open=%d req/s=%.0f errors=%.2f%% p95=%.1f p99=%.1f ms\n", n_open, (double)win_total / dt,
-            win_total ? 100.0 * (double)win_errs / (double)win_total : 0, pct(hist_win, win_total, 0.95), pct(hist_win, win_total, 0.99));
+    fprintf(stderr, "win: open=%d req/s=%.0f errors=%.2f%% p95=%.1f p99=%.1f ms | p99 feed=%.0f post=%.0f like=%.0f new=%.0f\n", n_open,
+            (double)win_total / dt, win_total ? 100.0 * (double)win_errs / (double)win_total : 0, pct(hist_win, win_total, 0.95),
+            pct(hist_win, win_total, 0.99), pct(hist_winq[0], win_n[0], 0.99), pct(hist_winq[1], win_n[1], 0.99),
+            pct(hist_winq[2], win_n[2], 0.99), pct(hist_winq[3], win_n[3], 0.99));
     /* three windows of nothing but errors: the server is gone, and 70k retries a second only jam the
      * VMs' network (LG_KEEP_ON_DEAD=1 keeps going) */
     static int dead;
     dead = win_total && win_errs == win_total ? dead + 1 : 0;
     memset(hist_win, 0, sizeof hist_win);
+    memset(hist_winq, 0, sizeof hist_winq);
+    memset(win_n, 0, sizeof win_n);
     win_total = win_errs = 0;
     if (dead >= 3 && !getenv("LG_KEEP_ON_DEAD")) { fprintf(stderr, "server gone: stopping\n"); report(1); exit(0); }
     return;

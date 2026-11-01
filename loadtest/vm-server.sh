@@ -41,7 +41,7 @@ stop)
   journalctl -k --no-pager -o cat --since=@$(cat $RUN/since) | grep -iE 'out of memory|killed process' | cut -c1-160 || true
   echo "== server stats (every 10 s)"
   journalctl -u app --no-pager -o cat --since=@$(cat $RUN/since) | grep -E '^open=' |
-    sed -E 's/ batches\/s=[^ ]+ avg_batch=[^ ]+//; s/ held=.*maxrss=/ maxrss=/; s/ max_commit=[^ ]+ max_sweep=[^ ]+//' || true
+    sed -E 's/ batches\/s=[^ ]+ avg_batch=[^ ]+//; s/ inline=[^ ]+ feed_fallback=[^ ]+//; s/ max_sweep=[^ ]+//' || true
   echo "== memory (MB, every 5 s)"; cat $RUN/mem.log
   systemctl stop app 2>/dev/null || true
   ;;

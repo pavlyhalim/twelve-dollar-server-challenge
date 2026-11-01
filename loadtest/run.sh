@@ -151,7 +151,7 @@ one_run() { # build users [ramp hold rampdown] -> 0 on PASS
   local prof=""
   if [ -n "${PROFILE:-}" ]; then (sleep "$PROFILE"; vm "sudo bash /srv/vm-server.sh profile 30") > $LOGS/$b-$n.prof 2>&1 & prof=$!; fi
   sudo env LG_SRC=$SRC prlimit --nofile=1048576:1048576 $W/loadgen $VMIP 80 "$ROOT/seed/tokens.json" "$n" "$ramp" "$hold" "$down" 1 2>&1 |
-    grep --line-buffered -vE '^(slow|idle socket)|^\s+(GET|POST)' | tee -a $LOGS/$b-$n.log | grep --line-buffered -E '^win:|RESULT|stopping'
+    grep --line-buffered -vE '^idle socket' | tee -a $LOGS/$b-$n.log | grep --line-buffered -E '^win:|^\s+(GET|POST)|RESULT|stopping'
   [ -n "$prof" ] && { wait "$prof"; grep -A14 -- '-- CPU by function' $LOGS/$b-$n.prof | sed 's/^/   perf: /'; }
   if vm true 2>/dev/null; then vm "sudo bash /srv/vm-server.sh stop" >> $LOGS/$b-$n.log; else echo "guest not answering after the run (frozen)" >> $LOGS/$b-$n.log; vm_restart; fi
   local res srv rps
