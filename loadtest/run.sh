@@ -15,23 +15,45 @@ SSHO="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ER
 vm() { ssh $SSHO ubuntu@$VMIP "$@"; }
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 
-# The guest runs in a cgroup whose CPU quota can be set to slow its vCPU to the box's speed (BOX_US:
-# the box's CPU per request, 25 us for #233 at 270k on the leaderboard). The 10 ms period keeps the
-# pauses short. QUOTA=100 is a whole host core.
+# The guest's vCPU thread alone can be slowed to the box's speed (BOX_US: the box's CPU per request,
+# 25 us for #233 at 270k on the leaderboard): QEMU goes into a cgroup with two threaded children,
+# the vCPU thread ("CPU 0/KVM") in one with a cpu.max quota, every other thread (vhost-net, I/O) in
+# the other, uncapped, as the box's host does that work outside its vCPU. Capping the whole process
+# starved the vCPU behind the network thread. The 10 ms period keeps the pauses short.
 QUOTA=100
+CG=/sys/fs/cgroup/lt
+set_quota() {
+  [ -d $CG/vcpu ] || return 0
+  if [ "$QUOTA" -ge 100 ]; then echo "max 10000"; else echo "$((QUOTA * 100)) 10000"; fi | sudo tee $CG/vcpu/cpu.max >/dev/null
+}
+cg_setup() {
+  local pid tid t
+  pid=$(cat $W/qemu.pid)
+  tid=$(ps -T -p "$pid" -o spid=,comm= | awk '/CPU 0\/KVM/ {print $1; exit}')
+  [ -n "$tid" ] || { echo "no vCPU thread found; running unthrottled"; return 0; }
+  grep -qw cpu /sys/fs/cgroup/cgroup.subtree_control || echo +cpu | sudo tee /sys/fs/cgroup/cgroup.subtree_control >/dev/null
+  sudo mkdir -p $CG
+  echo "$pid" | sudo tee $CG/cgroup.procs >/dev/null
+  sudo mkdir -p $CG/vcpu $CG/other
+  echo threaded | sudo tee $CG/vcpu/cgroup.type $CG/other/cgroup.type >/dev/null
+  echo +cpu | sudo tee $CG/cgroup.subtree_control >/dev/null
+  for t in $(ls /proc/"$pid"/task); do echo "$t" | sudo tee $CG/other/cgroup.threads >/dev/null 2>&1; done
+  echo "$tid" | sudo tee $CG/vcpu/cgroup.threads >/dev/null
+  set_quota
+  echo "vCPU thread $tid capped alone: cpu.max $(cat $CG/vcpu/cpu.max)"
+}
 vm_start() {
-  sudo systemd-run --scope --unit=vmcpu -p CPUQuota=${QUOTA}% -p CPUQuotaPeriodSec=10ms --quiet \
-    qemu-system-x86_64 -enable-kvm -cpu host -smp 1 -m 2048 \
+  sudo qemu-system-x86_64 -enable-kvm -cpu host -smp 1 -m 2048 \
     -drive file=$W/disk.qcow2,if=virtio -drive file=$W/seed.iso,if=virtio,format=raw \
     -netdev tap,id=n0,ifname=tap0,script=no,downscript=no,vhost=on -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56 \
     -display none -serial file:$W/serial.log -daemonize -pidfile $W/qemu.pid
+  cg_setup || echo "cgroup setup failed; running unthrottled"
   for _ in $(seq 120); do vm true 2>/dev/null && return 0; sleep 3; done
   echo "guest did not answer on ssh"; tail -30 $W/serial.log; return 1
 }
 vm_restart() {
   log "restarting the guest"
   sudo kill "$(cat $W/qemu.pid)" 2>/dev/null; sleep 3
-  sudo systemctl stop vmcpu.scope 2>/dev/null; sudo systemctl reset-failed vmcpu.scope 2>/dev/null
   vm_start
 }
 
@@ -112,6 +134,7 @@ one_run() { # build users [ramp hold rampdown] -> 0 on PASS
   rps=$(grep -E '^win:' $LOGS/$b-$n.log | awk -F'req/s=' '{split($2,a," "); s+=a[1]; k++} END {if (k) printf "%.0f", s/k}')
   printf '%-6s %8s  %-58s %8s %s quota=%s%%\n' "$b" "$n" "${res:-no result}" "${rps:-?}" "${srv:-guest frozen}" "$QUOTA" | tee -a $LOGS/summary.txt
   grep -iE 'killed process|frozen' $LOGS/$b-$n.log | head -2
+  [ -f $CG/vcpu/cpu.stat ] && echo "   vCPU cgroup: $(grep -E 'usage_usec|nr_throttled|throttled_usec' $CG/vcpu/cpu.stat | tr '\n' ' ')"
   echo "   host: conntrack $(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo -)/$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo -), $(grep -m1 RESULT -B1 $LOGS/$b-$n.log | head -1 | grep -oE 'conn_err=[0-9]+|timeout=[0-9]+|eof=[0-9]+|max_loop=[0-9]+ms' | tr '\n' ' ')"
   [[ $res == PASS* ]]
 }
@@ -124,8 +147,8 @@ if [ -n "${BOX_US:-}" ]; then
   reqs=$(grep -E '^\[' "$f" | tail -1 | grep -oE 'reqs=[0-9]+' | cut -d= -f2)
   us=$(awk -v ms="${ms:-0}" -v r="${reqs:-0}" 'BEGIN {if (r > 0) printf "%.2f", ms * 1000 / r}')
   QUOTA=$(awk -v us="${us:-0}" -v box="$BOX_US" 'BEGIN {q = int(100 * us / box + 0.5); if (q < 10) q = 10; if (q > 100) q = 100; print q}')
-  sudo systemctl set-property --runtime vmcpu.scope CPUQuota=${QUOTA}%
-  log "calibration: merged build at ${CAL_USERS:-270000} users unthrottled: ${us} us per request (box ${BOX_US}) -> guest CPU quota ${QUOTA}%"
+  set_quota
+  log "calibration: merged build at ${CAL_USERS:-270000} users unthrottled: ${us} us per request (box ${BOX_US}) -> vCPU quota ${QUOTA}% (cpu.max $(cat $CG/vcpu/cpu.max 2>/dev/null))"
   echo "calibration: ${us} us/request unthrottled, box ${BOX_US} -> quota ${QUOTA}%" >> $LOGS/summary.txt
 fi
 for spec in $RUNS; do
