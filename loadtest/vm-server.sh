@@ -4,6 +4,7 @@
 # copy of the seed; samples memory every 5 s without walking sockets.
 #   vm-server.sh start <submission-dir>
 #   vm-server.sh stop
+#   vm-server.sh profile <seconds>   perf (all CPUs, call graphs) and TCP counters over a window, mid-run
 set -euo pipefail
 RUN=/srv/run
 CG=/sys/fs/cgroup/system.slice/app.service
@@ -43,5 +44,21 @@ stop)
     sed -E 's/ batches\/s=[^ ]+ avg_batch=[^ ]+//; s/ held=.*maxrss=/ maxrss=/; s/ max_commit=[^ ]+ max_sweep=[^ ]+//' || true
   echo "== memory (MB, every 5 s)"; cat $RUN/mem.log
   systemctl stop app 2>/dev/null || true
+  ;;
+profile)
+  set +e +o pipefail # head closes pipes early; a short report beats none
+  d=${2:-30}
+  sysctl -qw kernel.kptr_restrict=0 kernel.perf_event_paranoid=-1
+  echo "== profile: ${d} s from $(date +%T)"
+  echo "-- sockstat before"; cat /proc/net/sockstat
+  nstat -n
+  perf record -a -g -F 499 -o /tmp/perf.data -- sleep "$d" >/dev/null 2>&1 || echo "perf record failed"
+  echo "-- TCP counters over the window"; nstat | grep -vE '^#' | sort -k2 -nr | head -40
+  echo "-- sockstat after"; cat /proc/net/sockstat
+  echo "-- tcp_mem limits (pages)"; cat /proc/sys/net/ipv4/tcp_mem
+  echo "-- CPU by process and object"; perf report -i /tmp/perf.data --no-children --sort comm,dso -g none --stdio 2>/dev/null | grep -E '^ +[0-9]' | head -12
+  echo "-- CPU by function (self)"; perf report -i /tmp/perf.data --no-children --sort sym -g none --stdio 2>/dev/null | grep -E '^ +[0-9]' | head -50
+  echo "-- callers of the top kernel functions"
+  perf report -i /tmp/perf.data --no-children --sort sym -g caller,0.5,callee --stdio 2>/dev/null | grep -vE '^$|^#' | head -150
   ;;
 esac

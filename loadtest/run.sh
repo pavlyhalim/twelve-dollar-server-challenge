@@ -127,6 +127,8 @@ log "== building both (install.sh as root, build.sh with PGO as the user)"
 for b in M P; do
   vm "cd /srv/$b && sudo bash install.sh >/dev/null 2>&1; bash build.sh 2>&1 | grep -E 'train:|built|rror'" | sed "s/^/$b: /"
 done
+# PROFILE=<seconds into the run>: perf and TCP counters over 30 s at that point of every run
+[ -n "${PROFILE:-}" ] && vm 'sudo apt-get install -y -qq linux-tools-$(uname -r) linux-tools-common >/dev/null 2>&1; perf --version'
 
 gcc -O2 -o $W/loadgen "$ROOT/loadtest/loadgen.c"
 SRC=$(seq -s, -f "10.0.0.%g" 100 107)
@@ -136,8 +138,11 @@ one_run() { # build users [ramp hold rampdown] -> 0 on PASS
   log "== $b at $n users"
   vm true 2>/dev/null || vm_restart || exit 1
   vm "sudo bash /srv/vm-server.sh start /srv/$b" | tee $LOGS/$b-$n.log
+  local prof=""
+  if [ -n "${PROFILE:-}" ]; then (sleep "$PROFILE"; vm "sudo bash /srv/vm-server.sh profile 30") > $LOGS/$b-$n.prof 2>&1 & prof=$!; fi
   sudo env LG_SRC=$SRC prlimit --nofile=1048576:1048576 $W/loadgen $VMIP 80 "$ROOT/seed/tokens.json" "$n" "$ramp" "$hold" "$down" 1 2>&1 |
     grep --line-buffered -vE '^(slow|idle socket)|^\s+(GET|POST)' | tee -a $LOGS/$b-$n.log | grep --line-buffered -E '^win:|RESULT|stopping'
+  [ -n "$prof" ] && { wait "$prof"; grep -A14 -- '-- CPU by function' $LOGS/$b-$n.prof | sed 's/^/   perf: /'; }
   if vm true 2>/dev/null; then vm "sudo bash /srv/vm-server.sh stop" >> $LOGS/$b-$n.log; else echo "guest not answering after the run (frozen)" >> $LOGS/$b-$n.log; vm_restart; fi
   local res srv rps
   res=$(grep -m1 RESULT $LOGS/$b-$n.log | sed 's/RESULT: //'); srv=$(grep -m1 '== server:' $LOGS/$b-$n.log | sed 's/== server: //')
