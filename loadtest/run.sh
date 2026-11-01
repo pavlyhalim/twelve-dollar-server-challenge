@@ -66,6 +66,12 @@ EXT=$(ip route show default | awk '{print $5; exit}')
 sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o "$EXT" -j MASQUERADE
 sudo iptables -I FORWARD -i tap0 -j ACCEPT
 sudo iptables -I FORWARD -o tap0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+# The NAT above loads connection tracking, whose table (262,144 entries on this runner) would drop
+# packets for every connection past it, around 210-265k: the load generator's traffic to the guest
+# is left untracked (the box has no firewall and no tracking table), and the limit raised anyway.
+sudo iptables -t raw -I OUTPUT -o tap0 -d $VMIP -j NOTRACK
+sudo iptables -t raw -I PREROUTING -i tap0 -s $VMIP -d 10.0.0.0/24 -j NOTRACK
+sudo sysctl -qw net.netfilter.nf_conntrack_max=4000000 2>/dev/null || true
 
 log "== booting the guest"
 vm_start || exit 1
@@ -100,6 +106,7 @@ one_run() { # build users -> 0 on PASS
   rps=$(grep -E '^win:' $LOGS/$b-$n.log | awk -F'req/s=' '{split($2,a," "); s+=a[1]; k++} END {if (k) printf "%.0f", s/k}')
   printf '%-6s %8s  %-58s %8s %s\n' "$b" "$n" "${res:-no result}" "${rps:-?}" "${srv:-guest frozen}" | tee -a $LOGS/summary.txt
   grep -iE 'killed process|frozen' $LOGS/$b-$n.log | head -2
+  echo "   host: conntrack $(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo -)/$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo -), $(grep -m1 RESULT -B1 $LOGS/$b-$n.log | head -1 | grep -oE 'conn_err=[0-9]+|timeout=[0-9]+|eof=[0-9]+|max_loop=[0-9]+ms' | tr '\n' ' ')"
   [[ $res == PASS* ]]
 }
 for spec in $RUNS; do
