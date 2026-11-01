@@ -8,6 +8,9 @@ on:
       runs:
         description: "build:users runs, a list is tried top down until one passes (M = merged #233, P = #245)"
         default: "P:340000,320000,300000,280000,260000 M:280000"
+      box_us:
+        description: "the box's CPU per request in us, to slow the guest to its speed (empty: no throttle)"
+        default: ""
 permissions:
   contents: read
 jobs:
@@ -20,6 +23,8 @@ jobs:
       - name: seed
         run: sudo apt-get update -qq && sudo apt-get install -y -qq sqlite3 && bash seed/make-seed.sh
       - name: load test
+        env:
+          BOX_US: ${{ github.event.inputs.box_us }}
         run: bash loadtest/run.sh "${{ github.event.inputs.runs }}"
       - uses: actions/upload-artifact@v4
         if: always()

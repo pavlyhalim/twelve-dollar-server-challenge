@@ -15,8 +15,13 @@ SSHO="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ER
 vm() { ssh $SSHO ubuntu@$VMIP "$@"; }
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 
+# The guest runs in a cgroup whose CPU quota can be set to slow its vCPU to the box's speed (BOX_US:
+# the box's CPU per request, 25 us for #233 at 270k on the leaderboard). The 10 ms period keeps the
+# pauses short. QUOTA=100 is a whole host core.
+QUOTA=100
 vm_start() {
-  sudo qemu-system-x86_64 -enable-kvm -cpu host -smp 1 -m 2048 \
+  sudo systemd-run --scope --unit=vmcpu -p CPUQuota=${QUOTA}% -p CPUQuotaPeriodSec=10ms --quiet \
+    qemu-system-x86_64 -enable-kvm -cpu host -smp 1 -m 2048 \
     -drive file=$W/disk.qcow2,if=virtio -drive file=$W/seed.iso,if=virtio,format=raw \
     -netdev tap,id=n0,ifname=tap0,script=no,downscript=no,vhost=on -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56 \
     -display none -serial file:$W/serial.log -daemonize -pidfile $W/qemu.pid
@@ -26,6 +31,7 @@ vm_start() {
 vm_restart() {
   log "restarting the guest"
   sudo kill "$(cat $W/qemu.pid)" 2>/dev/null; sleep 3
+  sudo systemctl stop vmcpu.scope 2>/dev/null; sudo systemctl reset-failed vmcpu.scope 2>/dev/null
   vm_start
 }
 
@@ -93,22 +99,35 @@ done
 gcc -O2 -o $W/loadgen "$ROOT/loadtest/loadgen.c"
 SRC=$(seq -s, -f "10.0.0.%g" 100 107)
 printf '%-6s %8s  %-58s %8s %s\n' build users result "req/s" server > $LOGS/summary.txt
-one_run() { # build users -> 0 on PASS
-  local b=$1 n=$2
+one_run() { # build users [ramp hold rampdown] -> 0 on PASS
+  local b=$1 n=$2 ramp=${3:-60} hold=${4:-${HOLD:-300}} down=${5:-30}
   log "== $b at $n users"
   vm true 2>/dev/null || vm_restart || exit 1
   vm "sudo bash /srv/vm-server.sh start /srv/$b" | tee $LOGS/$b-$n.log
-  sudo env LG_SRC=$SRC prlimit --nofile=1048576:1048576 $W/loadgen $VMIP 80 "$ROOT/seed/tokens.json" "$n" 60 "${HOLD:-300}" 30 1 2>&1 |
+  sudo env LG_SRC=$SRC prlimit --nofile=1048576:1048576 $W/loadgen $VMIP 80 "$ROOT/seed/tokens.json" "$n" "$ramp" "$hold" "$down" 1 2>&1 |
     grep --line-buffered -vE '^(slow|idle socket)|^\s+(GET|POST)' | tee -a $LOGS/$b-$n.log | grep --line-buffered -E '^win:|RESULT|stopping'
   if vm true 2>/dev/null; then vm "sudo bash /srv/vm-server.sh stop" >> $LOGS/$b-$n.log; else echo "guest not answering after the run (frozen)" >> $LOGS/$b-$n.log; vm_restart; fi
   local res srv rps
   res=$(grep -m1 RESULT $LOGS/$b-$n.log | sed 's/RESULT: //'); srv=$(grep -m1 '== server:' $LOGS/$b-$n.log | sed 's/== server: //')
   rps=$(grep -E '^win:' $LOGS/$b-$n.log | awk -F'req/s=' '{split($2,a," "); s+=a[1]; k++} END {if (k) printf "%.0f", s/k}')
-  printf '%-6s %8s  %-58s %8s %s\n' "$b" "$n" "${res:-no result}" "${rps:-?}" "${srv:-guest frozen}" | tee -a $LOGS/summary.txt
+  printf '%-6s %8s  %-58s %8s %s quota=%s%%\n' "$b" "$n" "${res:-no result}" "${rps:-?}" "${srv:-guest frozen}" "$QUOTA" | tee -a $LOGS/summary.txt
   grep -iE 'killed process|frozen' $LOGS/$b-$n.log | head -2
   echo "   host: conntrack $(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo -)/$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo -), $(grep -m1 RESULT -B1 $LOGS/$b-$n.log | head -1 | grep -oE 'conn_err=[0-9]+|timeout=[0-9]+|eof=[0-9]+|max_loop=[0-9]+ms' | tr '\n' ' ')"
   [[ $res == PASS* ]]
 }
+# Calibration (BOX_US set): the merged build at CAL_USERS with the guest unthrottled; its CPU per
+# request against the box's sets the quota for every run after it.
+if [ -n "${BOX_US:-}" ]; then
+  one_run M "${CAL_USERS:-270000}" 60 60 0 >/dev/null 2>&1 || true
+  f=$LOGS/M-${CAL_USERS:-270000}.log; mv "$f" "$LOGS/calibration.log"; f=$LOGS/calibration.log
+  ms=$(grep -m1 -oE 'cpu_ms=[0-9]+' "$f" | cut -d= -f2)
+  reqs=$(grep -E '^\[' "$f" | tail -1 | grep -oE 'reqs=[0-9]+' | cut -d= -f2)
+  us=$(awk -v ms="${ms:-0}" -v r="${reqs:-0}" 'BEGIN {if (r > 0) printf "%.2f", ms * 1000 / r}')
+  QUOTA=$(awk -v us="${us:-0}" -v box="$BOX_US" 'BEGIN {q = int(100 * us / box + 0.5); if (q < 10) q = 10; if (q > 100) q = 100; print q}')
+  sudo systemctl set-property --runtime vmcpu.scope CPUQuota=${QUOTA}%
+  log "calibration: merged build at ${CAL_USERS:-270000} users unthrottled: ${us} us per request (box ${BOX_US}) -> guest CPU quota ${QUOTA}%"
+  echo "calibration: ${us} us/request unthrottled, box ${BOX_US} -> quota ${QUOTA}%" >> $LOGS/summary.txt
+fi
 for spec in $RUNS; do
   b=${spec%%:*}
   for n in $(echo "${spec##*:}" | tr ',' ' '); do

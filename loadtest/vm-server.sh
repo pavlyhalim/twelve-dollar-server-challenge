@@ -36,7 +36,7 @@ start)
 stop)
   systemctl stop sampler 2>/dev/null || true
   cpu1=$(systemctl show -p CPUUsageNSec --value app 2>/dev/null || echo 0)
-  echo "== server: $(systemctl show -p ActiveState -p Result app | tr '\n' ' ') cpu_s=$(( (${cpu1:-0} - $(cat $RUN/cpu0)) / 1000000000 ))"
+  echo "== server: $(systemctl show -p ActiveState -p Result app | tr '\n' ' ') cpu_ms=$(( (${cpu1:-0} - $(cat $RUN/cpu0)) / 1000000 ))"
   journalctl -k --no-pager -o cat --since=@$(cat $RUN/since) | grep -iE 'out of memory|killed process' | cut -c1-160 || true
   echo "== server stats (every 10 s)"
   journalctl -u app --no-pager -o cat --since=@$(cat $RUN/since) | grep -E '^open=' |
