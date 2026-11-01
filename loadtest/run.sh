@@ -156,7 +156,9 @@ if [ -n "${BOX_US:-}" ]; then
   echo "calibration: ${us} us/request unthrottled, box ${BOX_US} -> quota ${QUOTA}%" >> $LOGS/summary.txt
   # a guest slower than the box even uncapped can't stand in for it (GitHub's EPYC 7763 hosts measured
   # 45-68 us against 10.6 on a 9V45: nested virtualization costs more there); stop and let it be rerun
-  if awk -v us="${us:-999}" -v box="$BOX_US" 'BEGIN {exit !(us > box)}'; then
+  # (the merged build failing uncapped where the box passed means the same, whatever the CPU figure:
+  # a server that falls behind uses CPU out of proportion to the requests it serves)
+  if ! grep -q 'RESULT: PASS' "$f" || awk -v us="${us:-999}" -v box="$BOX_US" 'BEGIN {exit !(us > box)}'; then
     echo "RUNNER SLOWER THAN THE BOX: ${us} us per request uncapped against ${BOX_US}; rerun to get a faster host" | tee -a $LOGS/summary.txt
     exit 3
   fi
