@@ -187,12 +187,28 @@ static int vu_connect(struct vu *v) {
   int one = 1;
   setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-  setsockopt(fd, IPPROTO_IP, IP_BIND_ADDRESS_NO_PORT, &one, sizeof one);
   struct sockaddr_in src = {.sin_family = AF_INET, .sin_port = 0};
-  if (nsrc) { /* a remote server: one source address holds ~64k connections to one port */
+  /* A remote server: one source address holds ~64k connections to one port, so users are spread
+   * over the LG_SRC addresses, and each user gets its own source port as well. With port 0 the
+   * kernel searches for a free port at connect() (__inet_hash_connect), a search that grows with the
+   * ports in use: at 212k connections and 5,700 new ones a second it stalled this one thread.
+   * A fixed port is a single check. If it is still held (the user's last connection closing), the
+   * kernel picks one as before. */
+  unsigned port = nsrc ? 1024u + (unsigned)vu / (unsigned)nsrc : 0;
+  if (nsrc && port <= 65535) {
+    src.sin_addr = srcs[vu % nsrc];
+    src.sin_port = htons((uint16_t)port);
+    if (bind(fd, (struct sockaddr *)&src, sizeof src) < 0) {
+      src.sin_port = 0;
+      setsockopt(fd, IPPROTO_IP, IP_BIND_ADDRESS_NO_PORT, &one, sizeof one);
+      bind(fd, (struct sockaddr *)&src, sizeof src);
+    }
+  } else if (nsrc) {
+    setsockopt(fd, IPPROTO_IP, IP_BIND_ADDRESS_NO_PORT, &one, sizeof one);
     src.sin_addr = srcs[vu % nsrc];
     bind(fd, (struct sockaddr *)&src, sizeof src);
   } else if (server.sin_addr.s_addr == htonl(0x7f000001u)) {
+    setsockopt(fd, IPPROTO_IP, IP_BIND_ADDRESS_NO_PORT, &one, sizeof one);
     src.sin_addr.s_addr = htonl(0x7f000001u + (uint32_t)(vu % 250));
     bind(fd, (struct sockaddr *)&src, sizeof src);
   }

@@ -61,7 +61,7 @@ sudo ip tuntap add tap0 mode tap
 sudo ip addr add 10.0.0.1/24 dev tap0
 for i in $(seq 100 107); do sudo ip addr add 10.0.0.$i/24 dev tap0; done
 sudo ip link set tap0 up
-sudo sysctl -qw net.ipv4.ip_forward=1 net.ipv4.ip_local_port_range="1024 65535" net.ipv4.tcp_max_tw_buckets=2000000
+sudo sysctl -qw net.ipv4.ip_forward=1 net.ipv4.ip_local_port_range="1024 65535" net.ipv4.tcp_max_tw_buckets=2000000 net.ipv4.tcp_tw_reuse=1 # load generator side only
 EXT=$(ip route show default | awk '{print $5; exit}')
 sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o "$EXT" -j MASQUERADE
 sudo iptables -I FORWARD -i tap0 -j ACCEPT
