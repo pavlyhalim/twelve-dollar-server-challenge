@@ -50,7 +50,8 @@ vm_start() {
     -display none -serial file:$W/serial.log -daemonize -pidfile $W/qemu.pid
   cg_setup || echo "cgroup setup failed; running unthrottled"
   # asked to match the box's speed but the cap isn't in place: the runs would mean nothing
-  if [ -n "${BOX_US:-}" ] && [ -z "$(cat $CG/vcpu/cgroup.threads 2>/dev/null)" ]; then # cgroup files report size 0 echo "VCPU CAP NOT APPLIED; stopping"; exit 4; fi
+  # (cgroup files report size 0, so the check reads the content)
+  if [ -n "${BOX_US:-}" ] && [ -z "$(cat $CG/vcpu/cgroup.threads 2>/dev/null)" ]; then echo "VCPU CAP NOT APPLIED; stopping"; exit 4; fi
   for _ in $(seq 120); do vm true 2>/dev/null && return 0; sleep 3; done
   echo "guest did not answer on ssh"; tail -30 $W/serial.log; return 1
 }
