@@ -1,0 +1,33 @@
+# Box-shaped load test of c-iouring-pavlyhalim on a GitHub runner: the server alone in a 1 vCPU /
+# 2 GiB KVM guest (Ubuntu 24.04, kernel 6.8), the load generator on the runner. Fork-only branch;
+# not part of any pull request.
+name: load test
+on:
+  push:
+    branches: [loadtest]
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "build:users runs (M = merged #233, P = #245)"
+        default: "M:260000 P:260000 M:280000 P:280000 M:300000 P:300000 P:320000"
+permissions:
+  contents: read
+jobs:
+  load:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: seed
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq sqlite3 && bash seed/make-seed.sh
+      - name: load test
+        # a push is a smoke test (20k users, 30 s holds); the full runs are started by hand
+        env:
+          HOLD: ${{ github.event_name == 'push' && '30' || '300' }}
+        run: bash loadtest/run.sh "${{ github.event.inputs.runs || 'M:20000 P:20000' }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: loadtest-logs
+          path: /tmp/lt/logs
