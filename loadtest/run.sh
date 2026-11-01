@@ -49,6 +49,8 @@ vm_start() {
     -netdev tap,id=n0,ifname=tap0,script=no,downscript=no,vhost=on -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56 \
     -display none -serial file:$W/serial.log -daemonize -pidfile $W/qemu.pid
   cg_setup || echo "cgroup setup failed; running unthrottled"
+  # asked to match the box's speed but the cap isn't in place: the runs would mean nothing
+  if [ -n "${BOX_US:-}" ] && [ ! -s $CG/vcpu/cgroup.threads ]; then echo "VCPU CAP NOT APPLIED; stopping"; exit 4; fi
   for _ in $(seq 120); do vm true 2>/dev/null && return 0; sleep 3; done
   echo "guest did not answer on ssh"; tail -30 $W/serial.log; return 1
 }
