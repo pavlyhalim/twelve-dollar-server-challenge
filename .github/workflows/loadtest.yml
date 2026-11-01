@@ -3,13 +3,11 @@
 # not part of any pull request.
 name: load test
 on:
-  push:
-    branches: [loadtest]
   workflow_dispatch:
     inputs:
       runs:
-        description: "build:users runs (M = merged #233, P = #245)"
-        default: "M:260000 P:260000 M:280000 P:280000 M:300000 P:300000 P:320000"
+        description: "build:users runs, a list is tried top down until one passes (M = merged #233, P = #245)"
+        default: "P:340000,320000,300000,280000,260000 M:280000"
 permissions:
   contents: read
 jobs:
@@ -22,10 +20,7 @@ jobs:
       - name: seed
         run: sudo apt-get update -qq && sudo apt-get install -y -qq sqlite3 && bash seed/make-seed.sh
       - name: load test
-        # a push is a smoke test (20k users, 30 s holds); the full runs are started by hand
-        env:
-          HOLD: ${{ github.event_name == 'push' && '30' || '300' }}
-        run: bash loadtest/run.sh "${{ github.event.inputs.runs || 'M:20000 P:20000' }}"
+        run: bash loadtest/run.sh "${{ github.event.inputs.runs }}"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

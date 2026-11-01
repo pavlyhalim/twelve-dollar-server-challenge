@@ -3,10 +3,11 @@
 # with 1 vCPU and 2 GiB (Ubuntu 24.04, kernel 6.8), the load generator on the runner over a tap link
 # with vhost-net (kernel networking, no userspace switch). Each run follows bench/load.js's stages:
 # ramp 60 s, hold 300 s (HOLD=...), ramp down 30 s, on a fresh copy of the seed, like a scored hold.
-#   bash loadtest/run.sh "M:260000 P:260000 ..."    M = the merged build (#233), P = the PR (#245)
+#   bash loadtest/run.sh "P:340000,320000,300000 M:280000"   M = the merged build (#233), P = the PR (#245)
+# A list after the colon is tried from the left until one level passes (top down: one pass answers it).
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-RUNS=${1:-"M:260000 P:260000 M:280000 P:280000 M:300000 P:300000 P:320000"}
+RUNS=${1:-"P:340000,320000,300000,280000,260000 M:280000"}
 MERGED_REF=${MERGED_REF:-fff6f25} # upstream main with #233 merged (its submission == 3f5c305)
 W=/tmp/lt; LOGS=$W/logs; mkdir -p $W $LOGS
 VMIP=10.0.0.2
@@ -86,17 +87,25 @@ done
 gcc -O2 -o $W/loadgen "$ROOT/loadtest/loadgen.c"
 SRC=$(seq -s, -f "10.0.0.%g" 100 107)
 printf '%-6s %8s  %-58s %8s %s\n' build users result "req/s" server > $LOGS/summary.txt
-for spec in $RUNS; do
-  b=${spec%%:*}; n=${spec##*:}
+one_run() { # build users -> 0 on PASS
+  local b=$1 n=$2
   log "== $b at $n users"
   vm true 2>/dev/null || vm_restart || exit 1
   vm "sudo bash /srv/vm-server.sh start /srv/$b" | tee $LOGS/$b-$n.log
   sudo env LG_SRC=$SRC prlimit --nofile=1048576:1048576 $W/loadgen $VMIP 80 "$ROOT/seed/tokens.json" "$n" 60 "${HOLD:-300}" 30 1 2>&1 |
     grep --line-buffered -vE '^(slow|idle socket)|^\s+(GET|POST)' | tee -a $LOGS/$b-$n.log | grep --line-buffered -E '^win:|RESULT|stopping'
   if vm true 2>/dev/null; then vm "sudo bash /srv/vm-server.sh stop" >> $LOGS/$b-$n.log; else echo "guest not answering after the run (frozen)" >> $LOGS/$b-$n.log; vm_restart; fi
+  local res srv rps
   res=$(grep -m1 RESULT $LOGS/$b-$n.log | sed 's/RESULT: //'); srv=$(grep -m1 '== server:' $LOGS/$b-$n.log | sed 's/== server: //')
   rps=$(grep -E '^win:' $LOGS/$b-$n.log | awk -F'req/s=' '{split($2,a," "); s+=a[1]; k++} END {if (k) printf "%.0f", s/k}')
   printf '%-6s %8s  %-58s %8s %s\n' "$b" "$n" "${res:-no result}" "${rps:-?}" "${srv:-guest frozen}" | tee -a $LOGS/summary.txt
   grep -iE 'killed process|frozen' $LOGS/$b-$n.log | head -2
+  [[ $res == PASS* ]]
+}
+for spec in $RUNS; do
+  b=${spec%%:*}
+  for n in $(echo "${spec##*:}" | tr ',' ' '); do
+    if one_run "$b" "$n"; then log "$b passes $n users"; break; fi
+  done
 done
 echo; cat $LOGS/summary.txt
