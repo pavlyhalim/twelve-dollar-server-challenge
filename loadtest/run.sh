@@ -8,7 +8,7 @@
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 RUNS=${1:-"P:340000,320000,300000,280000,260000 M:280000"}
-MERGED_REF=${MERGED_REF:-fff6f25} # upstream main with #233 merged (its submission == 3f5c305)
+MERGED_REF=${MERGED_REF:-6a1eab9} # upstream main with #245 merged (its submission == 7387a31, the scored code)
 W=/tmp/lt; LOGS=$W/logs; mkdir -p $W $LOGS
 VMIP=10.0.0.2
 SSHO="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 -i $W/key"
@@ -62,6 +62,11 @@ vm_restart() {
 }
 
 log "== host: $(nproc) CPUs, $(awk '/MemTotal/ {print int($2/1048576)}' /proc/meminfo) GB, $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2)"
+# EPYC 7763 hosts measured 45-68 us per request in the guest against the box's ~26: nothing run there says
+# anything about the box, so stop before spending an hour on it
+if grep -m1 'model name' /proc/cpuinfo | grep -q 7763; then
+  mkdir -p $LOGS; echo "RUNNER SLOWER THAN THE BOX: EPYC 7763 host; rerun to get a faster host" | tee -a $LOGS/summary.txt; exit 3
+fi
 ls -l /dev/kvm || { echo "no /dev/kvm on this runner"; exit 1; }
 sudo apt-get install -y -qq qemu-system-x86 qemu-utils cloud-image-utils >/dev/null
 curl -fsSL -o $W/base.img https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img

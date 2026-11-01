@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       runs:
-        description: "build:users runs, a list is tried top down until one passes (M = merged #233, P = #245)"
+        description: "build:users runs, a list is tried top down until one passes (M = merged #245 as scored, P = this branch)"
         default: "P:340000,320000,300000,280000,260000 M:280000"
       box_us:
         description: "the box's CPU per request in us, to slow the guest to its speed (empty: no throttle)"
