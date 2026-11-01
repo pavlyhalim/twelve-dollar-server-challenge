@@ -43,7 +43,8 @@ cg_setup() {
   echo "vCPU thread $tid capped alone: cpu.max $(cat $CG/vcpu/cpu.max)"
 }
 vm_start() {
-  sudo qemu-system-x86_64 -enable-kvm -cpu host -smp 1 -m 2048 \
+  # debug-threads=on names the vCPU thread "CPU 0/KVM", which is how cg_setup finds it
+  sudo qemu-system-x86_64 -name tdsc,debug-threads=on -enable-kvm -cpu host -smp 1 -m 2048 \
     -drive file=$W/disk.qcow2,if=virtio -drive file=$W/seed.iso,if=virtio,format=raw \
     -netdev tap,id=n0,ifname=tap0,script=no,downscript=no,vhost=on -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56 \
     -display none -serial file:$W/serial.log -daemonize -pidfile $W/qemu.pid
