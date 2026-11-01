@@ -28,7 +28,7 @@ set_quota() {
 }
 cg_setup() {
   local pid tid t
-  pid=$(cat $W/qemu.pid)
+  pid=$(sudo cat $W/qemu.pid) # written by QEMU as root
   tid=$(ps -T -p "$pid" -o spid=,comm= | awk '/CPU 0\/KVM/ {print $1; exit}')
   [ -n "$tid" ] || { echo "no vCPU thread found; running unthrottled"; return 0; }
   grep -qw cpu /sys/fs/cgroup/cgroup.subtree_control || echo +cpu | sudo tee /sys/fs/cgroup/cgroup.subtree_control >/dev/null
@@ -53,7 +53,7 @@ vm_start() {
 }
 vm_restart() {
   log "restarting the guest"
-  sudo kill "$(cat $W/qemu.pid)" 2>/dev/null; sleep 3
+  sudo kill "$(sudo cat $W/qemu.pid)" 2>/dev/null; sleep 3
   vm_start
 }
 
@@ -150,6 +150,12 @@ if [ -n "${BOX_US:-}" ]; then
   set_quota
   log "calibration: merged build at ${CAL_USERS:-270000} users unthrottled: ${us} us per request (box ${BOX_US}) -> vCPU quota ${QUOTA}% (cpu.max $(cat $CG/vcpu/cpu.max 2>/dev/null))"
   echo "calibration: ${us} us/request unthrottled, box ${BOX_US} -> quota ${QUOTA}%" >> $LOGS/summary.txt
+  # a guest slower than the box even uncapped can't stand in for it (GitHub's EPYC 7763 hosts measured
+  # 45-68 us against 10.6 on a 9V45: nested virtualization costs more there); stop and let it be rerun
+  if awk -v us="${us:-999}" -v box="$BOX_US" 'BEGIN {exit !(us > box)}'; then
+    echo "RUNNER SLOWER THAN THE BOX: ${us} us per request uncapped against ${BOX_US}; rerun to get a faster host" | tee -a $LOGS/summary.txt
+    exit 3
+  fi
 fi
 for spec in $RUNS; do
   b=${spec%%:*}
