@@ -8,7 +8,7 @@
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 RUNS=${1:-"P:340000,320000,300000,280000,260000 M:280000"}
-MERGED_REF=${MERGED_REF:-6a1eab9} # upstream main with #245 merged (its submission == 7387a31, the scored code)
+MERGED_REF=${MERGED_REF:-7387a31} # #245 as scored and merged (upstream 6a1eab9 has the same submission; the fork lacks that commit)
 W=/tmp/lt; LOGS=$W/logs; mkdir -p $W $LOGS
 VMIP=10.0.0.2
 SSHO="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 -i $W/key"
@@ -116,6 +116,7 @@ vm 'cloud-init status --wait >/dev/null; echo "guest: $(uname -r), $(nproc) vCPU
 
 log "== copying the two builds and the seed"
 rm -rf $W/merged && mkdir -p $W/merged
+git -C "$ROOT" cat-file -e "$MERGED_REF^{commit}" || { echo "no commit $MERGED_REF in this checkout; stopping"; exit 1; }
 git -C "$ROOT" archive "$MERGED_REF" submissions/c-iouring-pavlyhalim | tar -x -C $W/merged
 tar -C "$ROOT/submissions" --exclude=bin --exclude=pgo -cf - c-iouring-pavlyhalim | vm 'sudo mkdir -p /srv/P && sudo chown ubuntu /srv/P && tar -x -C /srv/P --strip-components=1'
 tar -C $W/merged/submissions -cf - c-iouring-pavlyhalim | vm 'sudo mkdir -p /srv/M && sudo chown ubuntu /srv/M && tar -x -C /srv/M --strip-components=1'
