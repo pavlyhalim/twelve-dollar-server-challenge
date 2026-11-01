@@ -5,6 +5,7 @@
  * and only then are the responses handed to the kernel, one send each, straight from the arena.
  */
 #define _GNU_SOURCE
+#include <malloc.h>
 #include "sqlite3.c"
 
 #include "sys.h"
@@ -212,8 +213,7 @@ static void conn_close(struct conn *c) {
   if (!(c->flags & CF_OPEN) || (c->flags & CF_CLOSING)) return;
   c->flags |= CF_CLOSING;
   struct rs *rs = conn_rs(c);
-  sqe_shutdown_close(&rs->r, c->slot, UD(UD_CLOSE, c->ring, c->slot, c->gen), UD(UD_POLL, c->ring, c->slot, c->gen),
-                     UD(UD_CANCEL, c->ring, c->slot, c->gen));
+  sqe_shutdown_close(&rs->r, c->slot, UD(UD_CLOSE, c->ring, c->slot, c->gen));
   S.closes++;
 }
 
@@ -547,23 +547,12 @@ static void on_accept(unsigned ri, struct io_uring_cqe *cqe) {
   arm_poll(c);
 }
 
-static void rearm_later(struct rs *rs, struct conn *c) {
-  c->flags |= CF_REARM;
-  if (rs->nrearm == rs->rearm_cap) {
-    rs->rearm_cap = rs->rearm_cap ? rs->rearm_cap * 2 : 1024;
-    rs->rearm = realloc(rs->rearm, rs->rearm_cap * sizeof *rs->rearm);
-    if (!rs->rearm) { perror("realloc"); exit(1); }
-  }
-  rs->rearm[rs->nrearm++] = c;
-}
-
 static void on_poll(unsigned ri, struct io_uring_cqe *cqe) {
   struct rs *rs = &R[ri];
   struct conn *c = &rs->conns[UD_SLOT(cqe->user_data)];
   if (c->gen != UD_GEN(cqe->user_data) || (c->flags & (CF_OPEN | CF_CLOSING)) != CF_OPEN) return;
   if (cqe->res < 0) { conn_close(c); return; }
-  queue_read(c); /* readable, or the peer hung up: the read tells which */
-  if (!(cqe->flags & IORING_CQE_F_MORE)) rearm_later(rs, c);
+  queue_read(c); /* readable, or the peer hung up: the read tells which; the read re-arms the poll */
 }
 
 static void on_recv(unsigned ri, struct io_uring_cqe *cqe) {
@@ -591,12 +580,12 @@ static void on_recv(unsigned ri, struct io_uring_cqe *cqe) {
   }
   if (has_buf) ring_buf_return(&rs->r, bid);
   if (!live) return;
-  if (cqe->res > 0) {
-    if ((unsigned)cqe->res == rs->r.buf_size) queue_read(c); /* the buffer filled: there may be more */
+  if ((unsigned)cqe->res == rs->r.buf_size || cqe->res == -ENOBUFS) { /* more may be waiting: read again */
+    if (cqe->res == -ENOBUFS) S.enobufs++;
+    queue_read(c);
     return;
   }
-  if (cqe->res == -EAGAIN) return; /* already read; the poll reports new data */
-  if (cqe->res == -ENOBUFS) { S.enobufs++; queue_read(c); return; }
+  if (cqe->res > 0 || cqe->res == -EAGAIN) { arm_poll(c); return; } /* wait for the next request */
   conn_close(c); /* EOF or error */
 }
 
@@ -951,6 +940,11 @@ int main(void) {
   prefault_stack(256 << 10);
   accept_policy();
 
+  /* keep freed heap memory instead of handing it back: after a burst, drain-first allocates and frees
+   * a small buffer per waiting request, and returning the heap's top each time made the kernel zero
+   * new pages again and again (20% of the CPU under overload) */
+  mallopt(M_TRIM_THRESHOLD, 256 << 20);
+  mallopt(M_TOP_PAD, 16 << 20);
   meminfo_fd = open("/proc/meminfo", O_RDONLY | O_CLOEXEC);
   valve_on = env_long("VALVE", 0) != 0;
   valve_update();
