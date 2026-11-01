@@ -77,6 +77,10 @@ log "== host: $(nproc) CPUs, $(awk '/MemTotal/ {print int($2/1048576)}' /proc/me
 if grep -m1 'model name' /proc/cpuinfo | grep -q 7763; then
   mkdir -p $LOGS; echo "RUNNER SLOWER THAN THE BOX: EPYC 7763 host; rerun to get a faster host" | tee -a $LOGS/summary.txt; exit 3
 fi
+# REQUIRE_CPU=<model substring>: stop unless the host is that model (the edge sits at a different level per model)
+if [ -n "${REQUIRE_CPU:-}" ] && ! grep -m1 'model name' /proc/cpuinfo | grep -q -- "$REQUIRE_CPU"; then
+  mkdir -p $LOGS; echo "RUNNER SLOWER THAN THE BOX: not a $REQUIRE_CPU host; rerun" | tee -a $LOGS/summary.txt; exit 3
+fi
 ls -l /dev/kvm || { echo "no /dev/kvm on this runner"; exit 1; }
 sudo apt-get install -y -qq qemu-system-x86 qemu-utils cloud-image-utils >/dev/null
 curl -fsSL -o $W/base.img https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img

@@ -31,8 +31,8 @@ Every user is a keep-alive connection, so the connection count is what the serve
   of 8). A ring's accepts are cancelled 4,096 slots before its table is full, because an accept that
   finds the table full makes the kernel reset that client, and the kernel keeps accepting on its own
   while the loop is busy.
-- An idle connection waits on a one-shot poll, re-armed after each read, and holds no buffer and no
-  heap, only a 40-byte record. When the poll reports it readable it goes on a read queue, and as soon as the batch's
+- An idle connection waits on a multishot poll and holds no buffer and no heap, only a 40-byte
+  record. When the poll reports it readable it goes on a read queue, and as soon as the batch's
   completions are in, the loop issues one read per queued connection (`MSG_DONTWAIT`, into a shared
   provided-buffer ring of 4,096 × 1 KB per ring), never more on a ring than it has free buffers.
   Those reads finish during the submit, so a request is answered in the batch that saw it ready
@@ -44,9 +44,8 @@ Every user is a keep-alive connection, so the connection count is what the serve
   700,000 times in 10 s, with turns of 1–3 s), until the requests waiting in the kernel ran the
   machine out of memory. The read queue absorbs a burst of any size instead. A poll is also
   smaller: 263 bytes of kernel memory per idle connection on 6.8 against 360 for a multishot
-  receive, measured over 50,000 sockets. The poll is one-shot so that a close needs no cancel (see
-  below); re-arming it is one more submission per request, and CPU at 31,000 requests/s was the
-  same as with a multishot poll.
+  receive, measured over 50,000 sockets. It costs one more submission per request: 15.5–16 µs per
+  request against 14.5 in the same test at 160,000 users.
 - Completion queues hold 65,536 entries per ring, more than a ring's connections, so a burst of
   completions never spills into the kernel's overflow list, which allocates per completion just
   when memory is shortest. Rings are made as connections need them: ring 0 at startup, each later
@@ -70,14 +69,12 @@ Every user is a keep-alive connection, so the connection count is what the serve
 - Ubuntu's 6.8.0-136 and later kernels reject provided-buffer-ring registration with `EINVAL`
   (Launchpad #2162843: an inverted reserved-field check). The server retries once with a nonzero
   reserved byte, which those kernels accept and a correct kernel never sees.
-- Idle keep-alives are closed after 90 s without a request. A close is a shutdown hard-linked to a
-  close of the slot. Nothing needs cancelling first: a request on a direct descriptor would keep the
-  socket alive after its slot is closed, but the connection's one-shot poll fires on the shutdown
-  and ends. With a multishot poll each close had to cancel it, and io_uring on 6.8 finds the poll in
-  a hash table of at most 256 buckets, about 400 polls a bucket at 100,000 connections: by
-  descriptor a cancel walks every poll (with 160,000 users leaving over 30 s, 10,000 closed), by
-  user data one bucket, which was still 20% of the CPU when an overloaded server's clients
-  reconnected. With the one-shot poll, all 160,000 close during the ramp-down with p99 at 23.5 ms.
+- Idle keep-alives are closed after 90 s without a request. A close is three linked operations:
+  cancel the connection's poll, shut the socket down, close the slot. The poll has to go, because a
+  request on a direct descriptor keeps the socket alive after its slot is closed, and it is
+  cancelled by its user data, a hash lookup. Cancelling by descriptor instead walks every armed poll
+  on the ring: with 160,000 users leaving over 30 s that closed 10,000 of them and the loop did
+  little else; by user data, all 160,000 closed with p99 at 101 ms.
 
 ## At the memory wall
 
@@ -93,8 +90,7 @@ and the OOM killer ends it. Nothing the loop needs is left to be found at that m
   runs unlocked.
 - Drain first. After a stall the loop reads faster than it answers: up to 16,384 reads a batch but
   only 2,048 answers, and what is read beyond that waits in the connection's own buffer, a copy the
-  size of the request, freed once answered (and the heap is not trimmed, so freed buffers are reused
-  rather than handed back and zeroed again by the kernel, which was 20% of the CPU under overload). A request left waiting in its socket costs a 3–4 KB
+  size of the request, freed once answered. A request left waiting in its socket costs a 3–4 KB
   network buffer; 170,000 of them came to 650 MB, far past TCP's hard limit on a 2 GB machine
   (177 MB), where the kernel prunes and drops data and spends the single vCPU doing it, so the loop
   never caught up. Read out at once, a backlog of 90,000 requests cleared within 20 s, and TCP's

@@ -11,6 +11,9 @@ on:
       box_us:
         description: "the box's CPU per request in us, to slow the guest to its speed (empty: no throttle)"
         default: ""
+      cpu:
+        description: "CPU model the runner must have, e.g. 9V74 (empty: any fast one)"
+        default: ""
       profile:
         description: "seconds into each run to take a 30 s perf profile and TCP counters (empty: none)"
         default: ""
@@ -29,6 +32,7 @@ jobs:
         env:
           BOX_US: ${{ github.event.inputs.box_us }}
           PROFILE: ${{ github.event.inputs.profile }}
+          REQUIRE_CPU: ${{ github.event.inputs.cpu }}
         run: bash loadtest/run.sh "${{ github.event.inputs.runs }}"
       - uses: actions/upload-artifact@v4
         if: always()

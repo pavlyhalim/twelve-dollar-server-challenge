@@ -79,13 +79,19 @@ static int db_wal_hook(void *ud, sqlite3 *c, const char *name, int frames) {
   return SQLITE_OK;
 }
 
+/* Under a saturated CPU the scheduler gives a nice-19 thread ~1.4% of it, under the ~4.5% the
+ * checkpoint needs at 300k users: the log then grows without end and the write gate shuts every
+ * second. Nice 10 gets ~9.7%. Set once: an unprivileged thread cannot lower its nice value later. */
+#ifndef CKPT_NICE
+#define CKPT_NICE 10
+#endif
 static void *db_ckpt_thread(void *ud) {
   struct db *d = ud;
   /* nice 19: on one vCPU a pass at the default priority takes the loop's CPU for its whole length,
    * 300-430 ms at the memory wall on the box, and c-iouring-public (#158) measured that stall as the
    * difference at the edge (2 of 3 holds died at nice 0, 3 of 3 held at 19). The loop's batches
    * are short, so the thread still runs between them. */
-  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
+  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), CKPT_NICE);
   pthread_setname_np(pthread_self(), "ckpt");
   prefault_stack(128 << 10);
   for (;;) {
