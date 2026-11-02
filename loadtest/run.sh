@@ -152,10 +152,14 @@ one_run() { # build users [ramp hold rampdown] -> 0 on PASS
   log "== $b at $n users"
   if [ "${FRESH:-1}" = 1 ]; then fresh_guest || exit 1; else vm true 2>/dev/null || vm_restart || exit 1; fi
   vm "sudo bash /srv/vm-server.sh start /srv/$b" | tee $LOGS/$b-$n.log
-  local prof=""
+  local prof="" stall=""
+  # STALL=<seconds into the run>:<seconds>: freeze the server (SIGSTOP) that long, so every connection
+  # has a request waiting when it wakes, the burst that once ran the receive buffers dry
+  if [ -n "${STALL:-}" ]; then (sleep "${STALL%%:*}"; vm "sudo systemctl kill -s STOP app; sleep ${STALL##*:}; sudo systemctl kill -s CONT app"; echo "stalled ${STALL##*:} s at ${STALL%%:*} s") >> $LOGS/$b-$n.log 2>&1 & stall=$!; fi
   if [ -n "${PROFILE:-}" ]; then (sleep "$PROFILE"; vm "sudo bash /srv/vm-server.sh profile 30") > $LOGS/$b-$n.prof 2>&1 & prof=$!; fi
   sudo env LG_SRC=$SRC prlimit --nofile=1048576:1048576 $W/loadgen $VMIP 80 "$ROOT/seed/tokens.json" "$n" "$ramp" "$hold" "$down" 1 2>&1 |
     grep --line-buffered -vE '^idle socket' | tee -a $LOGS/$b-$n.log | grep --line-buffered -E '^win:|^\s+(GET|POST)|RESULT|stopping'
+  [ -n "$stall" ] && wait "$stall"
   [ -n "$prof" ] && { wait "$prof"; grep -A14 -- '-- CPU by function' $LOGS/$b-$n.prof | sed 's/^/   perf: /'; }
   if vm true 2>/dev/null; then vm "sudo bash /srv/vm-server.sh stop" >> $LOGS/$b-$n.log; else echo "guest not answering after the run (frozen)" >> $LOGS/$b-$n.log; vm_restart; fi
   local res srv rps

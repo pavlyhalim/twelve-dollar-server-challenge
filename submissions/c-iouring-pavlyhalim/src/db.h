@@ -10,10 +10,18 @@
 #include <stdatomic.h>
 
 #define VFS_NAME "tdsc-wal" /* the WAL-write shim over unix-excl, defined below */
-#define WAL_WAKE_FRAMES 1000   /* wake the checkpoint thread */
-#define WAL_GATE_FRAMES 4000   /* hold writes until the log is fully copied, so the next write restarts it */
-#define WAL_INLINE_FRAMES 16384 /* last resort: checkpoint on the loop */
-#define WAL_GATE_MAX_NS 1000000000ULL
+/* The checkpoint runs in a few large passes per log, not one per commit: each pass costs two fsyncs
+ * and copies the hot pages again (c-iouring-public #252 held 17.5k against 15.5k requests/s with 4x
+ * fewer passes). The gate stays under 4,062 frames, the first wal-index hash table, so a page
+ * lookup never searches a second one; a hold is capped at 250 ms, and after a hold that ran out the
+ * gate waits for WAL_STEP_FRAMES more before it holds writes again, so a checkpoint that falls
+ * behind costs writes a short hold now and then, not a hold every second. */
+#define WAL_WAKE_FRAMES 2048    /* first pass of a log */
+#define WAL_STEP_FRAMES 2048    /* later passes: this many new frames since the last wake */
+#define WAL_GATE_FRAMES 3968    /* hold writes until the log is fully copied, so the next write restarts it */
+#define WAL_INLINE_FRAMES 16384 /* last resort: checkpoint on the loop, at most every 100 ms */
+#define WAL_GATE_MAX_NS 250000000ULL
+#define WAL_INLINE_GAP_NS 100000000ULL
 
 #define FEED_N 20
 #define FEED_SPAN 256 /* the 20 newest ids must sit within this many ids for the range plan */
@@ -56,6 +64,8 @@ struct db {
   _Atomic int wal_frames;
   int gate_held;
   uint64_t gate_since;
+  int woke_at, gate_at; /* frames at the last wake; frames at which the gate holds writes next */
+  uint64_t inline_at;
   /* stats */
   uint64_t n_ckpt, n_gate, n_inline, n_fallback;
 };
@@ -65,12 +75,16 @@ static int db_wal_hook(void *ud, sqlite3 *c, const char *name, int frames) {
   struct db *d = ud;
   atomic_store_explicit(&d->wal_frames, frames, memory_order_relaxed);
   atomic_fetch_add_explicit(&d->commit_seq, 1, memory_order_release);
-  if (frames >= WAL_WAKE_FRAMES) {
-    if (frames >= WAL_GATE_FRAMES && !d->gate_held) {
-      d->gate_held = 1;
-      d->gate_since = now_ns();
-      d->n_gate++;
-    }
+  if (frames < d->woke_at) d->woke_at = 0, d->gate_at = WAL_GATE_FRAMES; /* the log restarted */
+  int wake = frames >= WAL_WAKE_FRAMES && frames - d->woke_at >= WAL_STEP_FRAMES;
+  if (frames >= d->gate_at && !d->gate_held) {
+    d->gate_held = 1;
+    d->gate_since = now_ns();
+    d->n_gate++;
+    wake = 1;
+  }
+  if (wake) {
+    d->woke_at = frames;
     pthread_mutex_lock(&d->mu);
     d->wanted = 1;
     pthread_cond_signal(&d->cv);
@@ -79,19 +93,16 @@ static int db_wal_hook(void *ud, sqlite3 *c, const char *name, int frames) {
   return SQLITE_OK;
 }
 
-/* Under a saturated CPU the scheduler gives a nice-19 thread ~1.4% of it, under the ~4.5% the
- * checkpoint needs at 300k users: the log then grows without end and the write gate shuts every
- * second. Nice 10 gets ~9.7%. Set once: an unprivileged thread cannot lower its nice value later. */
-#ifndef CKPT_NICE
-#define CKPT_NICE 10
-#endif
 static void *db_ckpt_thread(void *ud) {
   struct db *d = ud;
-  /* nice 19: on one vCPU a pass at the default priority takes the loop's CPU for its whole length,
-   * 300-430 ms at the memory wall on the box, and c-iouring-public (#158) measured that stall as the
-   * difference at the edge (2 of 3 holds died at nice 0, 3 of 3 held at 19). The loop's batches
-   * are short, so the thread still runs between them. */
-  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), CKPT_NICE);
+  /* nice 10. At nice 0 a pass competes with the loop as an equal. At nice 19 the scheduler gives the
+   * thread ~1.4% of a saturated CPU against the ~4.5% the checkpoint needs at 300k users: in load
+   * tests at 300-310k it then made almost no progress for the whole hold, the log grew to 900,000
+   * frames and the write gate shut 4,400 times. Nice 10 gets ~9.7%, and at 310k the log stayed
+   * under 4,300 frames. (c-iouring-public #158, whose result this file cited for nice 19, has since
+   * retracted it: 1 of 3 holds on stock SQLite.) Set once: an unprivileged thread cannot lower its
+   * nice value again. */
+  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);
   pthread_setname_np(pthread_self(), "ckpt");
   prefault_stack(128 << 10);
   for (;;) {
@@ -443,6 +454,7 @@ static int vfs_install(void) {
 
 static int db_open(struct db *d, const char *path, long long mmap_bytes, int cache_kib) {
   memset(d, 0, sizeof *d);
+  d->gate_at = WAL_GATE_FRAMES;
   if (!getenv("DEFAULT_PCACHE") && pcache_install() < 0) {
     fprintf(stderr, "sqlite: could not install the page cache\n");
     return -1;
@@ -543,11 +555,17 @@ static int db_commit(struct db *d) {
 static inline int db_writes_allowed(struct db *d) {
   if (d->gate_held) {
     uint64_t seq = atomic_load_explicit(&d->commit_seq, memory_order_acquire);
-    if (atomic_load_explicit(&d->backfilled_seq, memory_order_acquire) == seq || now_ns() - d->gate_since > WAL_GATE_MAX_NS)
+    if (atomic_load_explicit(&d->backfilled_seq, memory_order_acquire) == seq) {
+      d->gate_held = 0; /* copied: the next write restarts the log */
+    } else if (now_ns() - d->gate_since > WAL_GATE_MAX_NS) {
       d->gate_held = 0;
+      d->gate_at = atomic_load_explicit(&d->wal_frames, memory_order_relaxed) + WAL_STEP_FRAMES;
+    }
   }
-  if (atomic_load_explicit(&d->wal_frames, memory_order_relaxed) >= WAL_INLINE_FRAMES && !d->in_txn) {
+  if (atomic_load_explicit(&d->wal_frames, memory_order_relaxed) >= WAL_INLINE_FRAMES && !d->in_txn &&
+      now_ns() - d->inline_at > WAL_INLINE_GAP_NS) {
     int nlog = 0, nckpt = 0;
+    d->inline_at = now_ns();
     sqlite3_wal_checkpoint_v2(d->c, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &nckpt);
     d->n_inline++;
     if (nlog == nckpt) {

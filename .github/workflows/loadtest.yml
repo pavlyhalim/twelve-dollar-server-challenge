@@ -14,6 +14,9 @@ on:
       cpu:
         description: "CPU model the runner must have, e.g. 9V74 (empty: any fast one)"
         default: ""
+      stall:
+        description: "freeze the server mid-run: <seconds into the run>:<seconds> (empty: none)"
+        default: ""
       profile:
         description: "seconds into each run to take a 30 s perf profile and TCP counters (empty: none)"
         default: ""
@@ -33,6 +36,7 @@ jobs:
           BOX_US: ${{ github.event.inputs.box_us }}
           PROFILE: ${{ github.event.inputs.profile }}
           REQUIRE_CPU: ${{ github.event.inputs.cpu }}
+          STALL: ${{ github.event.inputs.stall }}
         run: bash loadtest/run.sh "${{ github.event.inputs.runs }}"
       - uses: actions/upload-artifact@v4
         if: always()

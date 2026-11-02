@@ -23,14 +23,15 @@ start)
   date +%s > $RUN/since
   systemd-run --unit=sampler bash -c "
     t0=\$(date +%s)
-    echo '  t  avail   free  sunrec  srec  app_MB     tcp  tcp_mem  calib_ms'
+    echo '  t  avail   free  sunrec  srec  app_MB     tcp  tcp_mem  calib_ms   anon   file   sock kernel'
     while sleep 5; do
       cg=\$(cat $CG/memory.current 2>/dev/null || echo 0)
       read tcp tm < <(awk '/^TCP:/ {print \$3, \$11}' /proc/net/sockstat)
       read cc cw < <(/srv/calib)
-      awk -v t=\$(( \$(date +%s) - t0 )) -v cg=\$cg -v tcp=\$tcp -v tm=\$tm -v cc=\$cc '
+      read an fi so ke < <(awk '\$1==\"anon\" {a=\$2} \$1==\"file\" {f=\$2} \$1==\"sock\" {s=\$2} \$1==\"kernel\" {k=\$2} END {print int(a/1048576), int(f/1048576), int(s/1048576), int(k/1048576)}' $CG/memory.stat 2>/dev/null)
+      awk -v t=\$(( \$(date +%s) - t0 )) -v cg=\$cg -v tcp=\$tcp -v tm=\$tm -v cc=\$cc -v an=\$an -v fi=\$fi -v so=\$so -v ke=\$ke '
         /^MemAvailable:/ {a=\$2} /^MemFree:/ {f=\$2} /^SUnreclaim:/ {u=\$2} /^SReclaimable:/ {r=\$2}
-        END {printf \"%4d %6d %6d %6d %5d %7d %7d %8d %9s\\n\", t, a/1024, f/1024, u/1024, r/1024, cg/1048576, tcp, tm*4/1024, cc}' /proc/meminfo
+        END {printf \"%4d %6d %6d %6d %5d %7d %7d %8d %9s %6d %6d %6d %6d\\n\", t, a/1024, f/1024, u/1024, r/1024, cg/1048576, tcp, tm*4/1024, cc, an, fi, so, ke}' /proc/meminfo
     done > $RUN/mem.log" >/dev/null
   echo "server up: $(uname -r), MemTotal $(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo) MB"
   ;;
